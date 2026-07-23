@@ -45,20 +45,20 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
   const [config, setConfig] = useState(() => {
     const saved = localStorage.getItem('vitti_algo_config');
     const base = {
-      minStrikeDiff: 800,
-      minIvDiff: 5,
-      maxRatioDeviation: 0.25,
-      minSellPremium: 10,
-      maxNetPremium: 20,
-      minLongDist: 500,
-      maxSellQty: 10,
+      minStrikeDiff: 0,
+      minIvDiff: 0,
+      maxRatioDeviation: 0,
+      minSellPremium: 0,
+      maxNetPremium: 0,
+      minLongDist: 0,
+      maxSellQty: 0,
       // ATM Edge (P&L) column floors — keep only spreads whose at-ATM P&L and ROI clear
       // these minimums. Applied live in ResultTable against the ATM-priced P&L/ROI.
       minAtmPnl: 0,
       minAtmRoi: 0,
       atmRatioScaling: false,
-      atmRatioPctCall: 50,
-      atmRatioPctPut: 50
+      atmRatioPctCall: 0,
+      atmRatioPctPut: 0
     };
 
     if (saved) {
