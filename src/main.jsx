@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client'
 import { useState, useEffect } from 'react'
 import './index.css'
 import RatioSpreadScanner from './RatioSpreadScanner.jsx'
+import { AppDialogHost } from './components/common/AppDialog.jsx'
 
 function Root() {
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
@@ -18,11 +19,14 @@ function Root() {
   const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
 
   return (
-    <RatioSpreadScanner
-      onNavigate={() => {}}
-      theme={theme}
-      toggleTheme={toggleTheme}
-    />
+    <>
+      <RatioSpreadScanner
+        onNavigate={() => {}}
+        theme={theme}
+        toggleTheme={toggleTheme}
+      />
+      <AppDialogHost />
+    </>
   );
 }
 

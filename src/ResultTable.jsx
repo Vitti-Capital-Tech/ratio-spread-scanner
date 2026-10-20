@@ -1,10 +1,19 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { RefreshCw, Target, ChevronRight } from 'lucide-react';
+import { leverageFor } from './scannerUtils';
 
 // Human-readable explanation of how an ATM intrinsic price was resolved for a target
 // strike — exact listed / bracket-average / single-neighbour / omitted. Rendered as a
 // hover tooltip on the ATM P&L intrinsic cells so the bracket-and-average fallback
 // (getTickerPrice) can be verified at a glance without hand-checking the option chain.
+// OI (L/S) column: each leg's strike open interest in USD (millions), 🔒 when Delta has put
+// the strike in reduce-only (contract-level OI limit). Net delta stays under it; the long /
+// short deltas are in the cell's hover card (renderDeltaTip).
+function fmtOi(leg) {
+  if (!leg) return '—';
+  const v = leg.oiUsd != null && Number.isFinite(Number(leg.oiUsd)) ? `$${(Number(leg.oiUsd) / 1e6).toFixed(1)}M` : '—';
+  return leg.oiLocked === true ? `🔒 ${v}` : v;
+}
 function describeIntrinsic(detail, field) {
   if (!detail) return undefined;
   const m = (n) => `$${Number(n).toFixed(2)}`;
@@ -24,6 +33,40 @@ function describeIntrinsic(detail, field) {
 }
 // A fallback (not an exact strike) produced the price → flag it with a "≈" marker.
 const isApproxIntrinsic = (detail) => !!detail && (detail.mode === 'bracket' || detail.mode === 'single');
+
+// Hedge legs (3rd long) under the spread strikes — only when the Hedge toggle is on. The top 2
+// qualifying options by ATM ROI are listed (strikes from one step beyond the short up to width − one step,
+// under Max Hedge Price, inside the IV-diff range, 3-leg net within Max Debit); the ✓ one
+// (best ATM ROI) is what the row's Net Premium / ATM P&L / Margin / ROI use.
+function HedgeLine({ hedge, options }) {
+  if (!hedge) return null;
+  if (options && options.length > 1) {
+    // Only the top 2 by ATM ROI (the ✓ one first) — the rest are left out to keep rows short.
+    const top = [...options]
+      .sort((a, b) => (b.chosen - a.chosen) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)))
+      .slice(0, 2);
+    return (
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.45 }}>
+        {top.map(o => (
+          <div key={o.strike} style={o.chosen ? { fontWeight: 700, color: 'var(--text)' } : undefined}
+            title={`Hedge long ${Number(o.strike).toLocaleString()} @ ${Number(o.price).toFixed(2)}${o.iv != null ? ` (${Number(o.iv).toFixed(1)}% IV)` : ''} × ${o.qty} · net premium ${Number(o.netPremium ?? 0).toFixed(2)}${o.atAtm != null ? ` · worth ${Number(o.atAtm).toFixed(2)} at ATM` : ''}${o.roi != null ? ` · ATM ROI ${o.roi.toFixed(2)}%` : ''}${o.chosen ? ' — used for this row (best ATM ROI)' : ''}`}>
+            H: <span className="scanner-buy">+{Number(o.strike).toLocaleString()}</span> @ ${Number(o.price).toFixed(2)} × {o.qty}
+            {o.roi != null && <> · {o.roi >= 0 ? '+' : ''}{o.roi.toFixed(2)}%</>}{o.chosen ? ' ✓' : ''}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  const price = Number(hedge.price);
+  return (
+    <div
+      style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}
+      title={`Hedge long ${hedge.strike.toLocaleString()} @ $${price.toFixed(2)}${hedge.iv != null ? ` (${Number(hedge.iv).toFixed(1)}% IV)` : ''} × ${hedge.qty} (scaled short qty × hedge lot %)${hedge.atAtm != null ? ` · worth $${Number(hedge.atAtm).toFixed(2)} at ATM` : ''}`}
+    >
+      H: <span className="scanner-buy">+{hedge.strike.toLocaleString()}</span> @ ${price.toFixed(2)} × {hedge.qty}
+    </div>
+  );
+}
 
 export default function ResultTable({
   title,
@@ -45,11 +88,12 @@ export default function ResultTable({
   // renderTipContent). One shared card, position:fixed so the table's overflow
   // scroll container never clips it. { detail, field, x, y, below }.
   const [tip, setTip] = useState(null);
-  const showTip = (e, detail, field) => {
+  // kind: 'intrinsic' (ATM pricing cells) or 'delta' (OI (L/S) cells — detail is the row).
+  const showTip = (e, detail, field, kind = 'intrinsic') => {
     if (!detail) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const below = rect.top < 170; // not enough room above → flip under the cell
-    setTip({ detail, field, x: rect.left + rect.width / 2, y: below ? rect.bottom : rect.top, below });
+    setTip({ detail, field, kind, x: rect.left + rect.width / 2, y: below ? rect.bottom : rect.top, below });
   };
   const hideTip = () => setTip(null);
 
@@ -164,6 +208,23 @@ export default function ResultTable({
     );
   };
 
+  // Hover card for an OI (L/S) cell: the long and short leg deltas (same card style as the
+  // ATM pricing tooltip).
+  const renderDeltaTip = (row) => {
+    const k = (s) => Number(s).toLocaleString();
+    const d = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v).toFixed(4) : '—');
+    return (
+      <>
+        <div className="rt-tip-head">
+          <span className="rt-tip-badge bracket">Delta</span>
+          <span className="rt-tip-field">Long / Short</span>
+        </div>
+        <div className="rt-tip-row"><span className="k">Long · {k(row.buyLeg.strike)}</span><span className="v">{d(row.buyLeg.delta)}</span></div>
+        <div className="rt-tip-row"><span className="k">Short · {k(row.sellLeg.strike)}</span><span className="v">{d(row.sellLeg.delta)}</span></div>
+      </>
+    );
+  };
+
   const filteredResults = useMemo(() => {
     const processedResults = results.map(r => {
       // Use nearest-available strike when exact ATM is missing. Capture the resolution
@@ -207,18 +268,50 @@ export default function ResultTable({
         shortValue = 195000;
       }
 
-      const leverage = 200; // Fixed leverage as 200
+      // Per underlying + expiry (BTC 200x / ETH 100x at DTE 0–1, farther expiries ≤ 100x) —
+      // both read from the leg symbol (…-DDMMYY). Must match engine/lib/utils.js calcMargin().
+      const leverage = leverageFor(r.buyLeg?.symbol);
+
+      // Hedge leg (3rd long): qty = the SCALED short qty (after the $195k / leverage cap)
+      // × Hedge Lot %. At ATM it is worth the bid at the ATM-shifted hedge strike (same
+      // shift as the long/short); unquoted there = worthless (whole premium lost). Its
+      // premium adds to margin. Mirrors the engine's ATM P&L gate.
+      // Every qualifying hedge option is priced the same way and the row uses the one with the
+      // best ATM ROI (then ATM P&L); unpriceable at ATM → the nearest (first) option.
+      const hedgePct = (Number(config?.hedgeLotPct) || 0) / 100;
+      const legsPnl = hasAtmData
+        ? (buyIntrinsic - r.buyPrice) + (r.sellPrice - sellIntrinsic) * totalSellQty
+        : null;
+      const baseMargin = (r.buyPrice * adjustedLotSize) + (shortValue / leverage);
+      const priceHedge = (h) => {
+        const qty = Math.round(adjustedSellQty * hedgePct * 100) / 100;
+        const offset = Number(h.strike) - Number(r.buyLeg.strike);
+        const atAtm = atmStrike != null
+          ? (resolveTickerPrice(atmStrike + offset, type, 'bid').price ?? 0)
+          : 0;
+        const term = (atAtm - h.price) * totalSellQty * hedgePct;
+        const hMargin = h.price * adjustedSellQty * hedgePct;
+        const pnl = legsPnl != null ? (legsPnl + term) * adjustedLotSize : null;
+        const m = baseMargin + hMargin;
+        return { ...h, qty, atAtm, atAtmPnl: pnl, margin: m, roi: (pnl != null && m > 0) ? (pnl / m) * 100 : null };
+      };
+      const pricedOptions = (r.hedgeOptions?.length ? r.hedgeOptions : (r.hedge ? [r.hedge] : [])).map(priceHedge);
+      let hedge = null;
+      for (const o of pricedOptions) {
+        if (!hedge) { hedge = o; continue; }
+        const a = o.roi ?? -Infinity;
+        const b = hedge.roi ?? -Infinity;
+        if (a > b || (a === b && (o.atAtmPnl ?? -Infinity) > (hedge.atAtmPnl ?? -Infinity))) hedge = o;
+      }
+      const hedgeOptions = pricedOptions.map(o => ({ ...o, chosen: o === hedge }));
 
       // Compute P&L scaled to the adjusted lot size
-      const atAtmPnl = hasAtmData
-        ? ((buyIntrinsic - r.buyPrice) + (r.sellPrice - sellIntrinsic) * totalSellQty) * adjustedLotSize
-        : null;
-
-      const margin = (r.buyPrice * adjustedLotSize) + (shortValue / leverage);
+      const atAtmPnl = hedge ? hedge.atAtmPnl : (legsPnl != null ? legsPnl * adjustedLotSize : null);
+      const margin = hedge ? hedge.margin : baseMargin;
       const roi = (atAtmPnl != null && margin > 0) ? (atAtmPnl / margin) * 100 : null;
 
-      // Net premium is computed in the scanner from the scaled qty.
-      const rawNetPremium = r.netPremium;
+      // Net premium is computed in the scanner from the scaled qty (per chosen hedge option).
+      const rawNetPremium = hedge?.netPremium ?? r.netPremium;
 
       const isRatioChanged = atmRatioScaling && totalSellQty !== r.sellQty;
 
@@ -242,7 +335,10 @@ export default function ResultTable({
         margin,
         roi,
         roundedAtmRatio,
-        hasAtmData
+        hasAtmData,
+        hedge,
+        hedgeOptions,
+        netDelta3: hedge?.netDelta3 ?? r.netDelta3,
       };
     });
 
@@ -329,7 +425,7 @@ export default function ResultTable({
                 <th>Premium (L/S)</th>
                 <th>Ratio (L/S)</th>
                 <th>Net Premium & IV Edge</th>
-                <th className="hide-mobile">Delta (L/S)</th>
+                <th className="hide-mobile" title="Open interest of each leg's strike (USD). 🔒 = Delta has made the strike reduce-only (OI limit). N = net delta; hover a cell for the long / short delta.">OI (L/S)</th>
                 <th style={{ borderLeft: '1px solid rgba(0, 217, 163, 0.2)', background: 'rgba(0, 217, 163, 0.04)', color: 'var(--accent)' }}>ATM Pricing</th>
                 <th style={{ background: 'rgba(0, 217, 163, 0.04)', color: 'var(--accent)' }}>ATM Edge (P&L)</th>
                 <th style={{ borderRight: '1px solid rgba(0, 217, 163, 0.2)', background: 'rgba(0, 217, 163, 0.04)', color: 'var(--accent)' }}>Req. Margin</th>
@@ -398,6 +494,7 @@ export default function ResultTable({
                                 </span>
                               </div>
                               <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Δ: {bestRow.strikeDiff.toLocaleString()}</div>
+                              <HedgeLine hedge={bestRow.hedge} options={bestRow.hedgeOptions} />
                             </div>
                           </div>
                         </td>
@@ -427,16 +524,17 @@ export default function ResultTable({
                             ${Math.abs(parseFloat(bestRow.netPremium))}
                           </div>
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                            {bestRow.ivDiff.toFixed(1)}% IV
+                            {bestRow.ivDiff.toFixed(1)}% IV{bestRow.hedge ? ' · incl. hedge' : ''}
                           </div>
                         </td>
-                        <td className="hide-mobile">
+                        <td className="hide-mobile" style={{ cursor: 'help' }}
+                          onMouseEnter={(e) => showTip(e, bestRow, null, 'delta')} onMouseLeave={hideTip}>
                           <div>
-                            <span className='scanner-buy'>{bestRow.buyLeg.lotSize}</span>/
-                            <span className='scanner-sell'>{bestRow.sellLeg.delta?.toFixed(4)}</span>
+                            <span className='scanner-buy'>{fmtOi(bestRow.buyLeg)}</span>/
+                            <span className='scanner-sell'>{fmtOi(bestRow.sellLeg)}</span>
                           </div>
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                            N: {bestRow.deltaDiff.toFixed(4)}
+                            N: {bestRow.deltaDiff.toFixed(4)}{bestRow.netDelta3 != null ? ` · 3-leg ${bestRow.netDelta3.toFixed(4)}` : ''}
                           </div>
                         </td>
 
@@ -479,6 +577,7 @@ export default function ResultTable({
                                   </span>
                                 </div>
                                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Δ: {r.strikeDiff.toLocaleString()}</div>
+                                <HedgeLine hedge={r.hedge} options={r.hedgeOptions} />
                               </div>
                             </td>
                             <td>
@@ -507,16 +606,17 @@ export default function ResultTable({
                                 ${Math.abs(parseFloat(r.netPremium))}
                               </div>
                               <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                                {r.ivDiff.toFixed(1)}% IV
+                                {r.ivDiff.toFixed(1)}% IV{r.hedge ? ' · incl. hedge' : ''}
                               </div>
                             </td>
-                            <td className="hide-mobile">
+                            <td className="hide-mobile" style={{ cursor: 'help' }}
+                              onMouseEnter={(e) => showTip(e, r, null, 'delta')} onMouseLeave={hideTip}>
                               <div>
-                                <span className='scanner-buy'>{r.buyLeg.lotSize}</span>/
-                                <span className='scanner-sell'>{r.sellLeg.delta?.toFixed(4)}</span>
+                                <span className='scanner-buy'>{fmtOi(r.buyLeg)}</span>/
+                                <span className='scanner-sell'>{fmtOi(r.sellLeg)}</span>
                               </div>
                               <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                                N: {r.deltaDiff.toFixed(4)}
+                                N: {r.deltaDiff.toFixed(4)}{r.netDelta3 != null ? ` · 3-leg ${r.netDelta3.toFixed(4)}` : ''}
                               </div>
                             </td>
 
@@ -556,7 +656,7 @@ export default function ResultTable({
 
       {tip && (
         <div className={`rt-tip${tip.below ? ' below' : ''}`} role="tooltip" style={{ left: tip.x, top: tip.y }}>
-          {renderTipContent(tip.detail, tip.field)}
+          {tip.kind === 'delta' ? renderDeltaTip(tip.detail) : renderTipContent(tip.detail, tip.field)}
         </div>
       )}
     </div>

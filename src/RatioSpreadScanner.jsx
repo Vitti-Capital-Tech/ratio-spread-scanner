@@ -8,10 +8,12 @@ const UNDERLYINGS = ['BTC', 'ETH'];
 const SCANNER_TOP_KEY = 'vitti_scanner_top_spreads_v1';
 
 import ResultTable from './ResultTable';
-import { normalizeIv, toFiniteNumber, matchesOptionType } from './scannerUtils';
-import Navbar from './components/PaperTrading/Navbar';
+import { normalizeIv, toFiniteNumber, matchesOptionType, listHedgeStrikes, defaultOiCapM, effectiveOiCapM, isOiBlocked } from './scannerUtils';
+import Navbar from './components/RatioSpreadScanner/Navbar';
 import CustomSelect from './components/common/CustomSelect';
 import CustomInput from './components/common/CustomInput';
+import { ScannerFilterToolbar } from './components/scanner/ScannerFilters';
+import { SCANNER_DEFAULTS, SCANNER_CONFIG_KEY } from './components/scanner/scannerDefaults';
 import { ChevronDown } from 'lucide-react';
 
 // ── Main Scanner Component ──────────────────────────────────────────────────
@@ -32,7 +34,10 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
   const [lastRefreshed, setLastRefreshed] = useState(0);
 
   const [activeTableTab, setActiveTableTab] = useState('call');
+  // Filters panel: always shown on desktop (the toggle is hidden there by CSS); on phones
+  // it starts closed, since the stacked filters would push the tables far down.
   const [isFiltersCollapsed, setIsFiltersCollapsed] = useState(() => window.innerWidth <= 900);
+
 
   const wsRef = useRef(null);
   const scanIntervalRef = useRef(null);
@@ -43,23 +48,8 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
 
   // Configurable thresholds initialized from localStorage
   const [config, setConfig] = useState(() => {
-    const saved = localStorage.getItem('vitti_algo_config');
-    const base = {
-      minStrikeDiff: 0,
-      minIvDiff: 0,
-      maxRatioDeviation: 0,
-      minSellPremium: 0,
-      maxNetPremium: 0,
-      minLongDist: 0,
-      maxSellQty: 0,
-      // ATM Edge (P&L) column floors — keep only spreads whose at-ATM P&L and ROI clear
-      // these minimums. Applied live in ResultTable against the ATM-priced P&L/ROI.
-      minAtmPnl: 0,
-      minAtmRoi: 0,
-      atmRatioScaling: false,
-      atmRatioPctCall: 0,
-      atmRatioPctPut: 0
-    };
+    const saved = localStorage.getItem(SCANNER_CONFIG_KEY);
+    const base = { ...SCANNER_DEFAULTS };
 
     if (saved) {
       try {
@@ -263,6 +253,10 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
           const delta = t.greeks ? toFiniteNumber(t.greeks.delta) : null;
           const gamma = t.greeks ? toFiniteNumber(t.greeks.gamma) : null;
           const theta = t.greeks ? toFiniteNumber(t.greeks.theta) : null;
+          // Strike OI (USD / contracts) + Delta's OI-limit lock (reduce-only).
+          const oiUsd = toFiniteNumber(t.oi_value_usd);
+          const oiContracts = toFiniteNumber(t.oi_contracts);
+          const oiLocked = t.oi_reduce_only_mode == null ? null : (t.oi_reduce_only_mode === true || t.oi_reduce_only_mode === 'true');
 
           latestTickerDataRef.current[sym] = {
             symbol: sym,
@@ -279,6 +273,9 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             deltaNotional: delta !== null ? Math.abs(delta) * lotSize : null,
             gamma,
             theta,
+            oiUsd,
+            oiContracts,
+            oiLocked,
             lastUpdate: Date.now(),
             bidUpdatedAt: bid != null ? Date.now() : 0,
             askUpdatedAt: ask != null ? Date.now() : 0,
@@ -314,6 +311,9 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
         const delta = msg.greeks ? toFiniteNumber(msg.greeks.delta) : null;
         const gamma = msg.greeks ? toFiniteNumber(msg.greeks.gamma) : null;
         const theta = msg.greeks ? toFiniteNumber(msg.greeks.theta) : null;
+        const oiUsd = toFiniteNumber(msg.oi_value_usd);
+        const oiContracts = toFiniteNumber(msg.oi_contracts);
+        const oiLocked = msg.oi_reduce_only_mode == null ? null : (msg.oi_reduce_only_mode === true || msg.oi_reduce_only_mode === 'true');
 
         const meta = symbolMeta[sym];
         if (!meta) return;
@@ -340,6 +340,9 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             : prevBuffered?.deltaNotional,
           gamma: gamma ?? prevBuffered?.gamma ?? null,
           theta: theta ?? prevBuffered?.theta ?? null,
+          oiUsd: oiUsd ?? prevBuffered?.oiUsd ?? null,
+          oiContracts: oiContracts ?? prevBuffered?.oiContracts ?? null,
+          oiLocked: oiLocked ?? prevBuffered?.oiLocked ?? null,
           lastUpdate: Date.now(),
         };
 
@@ -362,6 +365,30 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
 
       const sorted = [...tickers].sort((a, b) => a.strike - b.strike);
       const validPairs = [];
+
+      // Hedge leg for a pair: the strike beyond the short that passes the price and IV-diff
+      // filters, nearest the short, via the same pickHedgeStrike the engine uses. null when off or no such strike (with the toggle on, such pairs are dropped). `unitQty` is per
+      // ratio unit (short qty × Hedge Lot %); ResultTable scales it with the short.
+      const hedgePool = config.hedgeEnabled ? sorted.filter(t => (t.ask ?? 0) > 0) : [];
+      // Every qualifying hedge for a pair (listHedgeStrikes — same rule as paper trading):
+      // strikes beyond the short from one strike step up to (width − one step) away, under
+      // Max Hedge Price and inside the IV-diff range. ResultTable prices each at ATM and uses
+      // the best ROI one for the row; all are listed under it.
+      const hedgeOptionsFor = (buyLeg, sellLeg, shortQty, width) => {
+        if (!config.hedgeEnabled || !(config.hedgeLotPct > 0)) return [];
+        const pool = hedgePool.filter(t => t !== buyLeg && t !== sellLeg);
+        return listHedgeStrikes(pool, buyLeg.type, sellLeg.strike, sellLeg.bidIv ?? sellLeg.iv, width, {
+          maxPrice: Number(config.hedgeMaxPrice ?? 10),
+          ivMin: Number(config.hedgeIvDiffMin ?? 0),
+          ivMax: Number(config.hedgeIvDiffMax ?? 2),
+        }).map(h => ({
+          strike: h.strike,
+          price: h.ask,
+          iv: h.askIv ?? h.iv ?? null,
+          deltaNotional: h.deltaNotional ?? null,
+          unitQty: shortQty * (config.hedgeLotPct / 100),
+        }));
+      };
 
       for (let i = 0; i < sorted.length; i++) {
         for (let j = i + 1; j < sorted.length; j++) {
@@ -445,8 +472,25 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             scaledSellQty = Math.max(sellQty, Math.round((sellQty + (pct / 100) * diff) / 0.25) * 0.25);
           }
 
+          // Hedge leg (when the toggle is on and the strike exists). Net premium and net
+          // delta then include all THREE legs, and the max-debit check uses the 3-leg net —
+          // the same gate paper trading applies at entry. IV edge stays long vs short.
+          // Each hedge option carries its own 3-leg net premium / net delta; only options that
+          // keep the net within Max Debit count. Hedge on → hedged spreads only (no 2-leg fallback).
+          const hedgeOptions = hedgeOptionsFor(buyLeg, sellLeg, scaledSellQty, strikeDiff)
+            .map(h => ({
+              ...h,
+              netPremium: scaledSellQty * sellPrice - buyPrice - h.unitQty * h.price,
+              netDelta3: h.deltaNotional != null ? buyDN - scaledSellQty * sellDN + h.unitQty * h.deltaNotional : null,
+            }))
+            .filter(h => h.netPremium >= -config.maxNetPremium);
+          if (config.hedgeEnabled && hedgeOptions.length === 0) continue;
+          // Provisional: nearest option (ResultTable switches to the best ATM ROI one).
+          const hedge = hedgeOptions[0] ?? null;
+
           // Max-debit (maxNetPremium) check on the post-scaling net premium.
-          const netPrem = scaledSellQty * sellPrice - buyPrice;
+          const netPrem = hedge ? hedge.netPremium : scaledSellQty * sellPrice - buyPrice;
+          const netDelta3 = hedge ? hedge.netDelta3 : null;
 
           if (netPrem < -config.maxNetPremium) continue;
 
@@ -468,7 +512,10 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             buyIv,
             sellIv,
             netPremium: netPrem.toFixed(2),
-            deltaDiff
+            deltaDiff,
+            netDelta3,
+            hedge,
+            hedgeOptions
           });
         }
       }
@@ -496,10 +543,15 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
       }
     }
 
+    // Delta OI limit (toggle): drop strikes Delta has locked (reduce-only) or whose OI (USD)
+    // is at/over the cap — no new leg can open there. Covers the long, the short and the
+    // hedge (the hedge pool is drawn from these). Pricing lookups still see the full chain.
+    const oiCapM = effectiveOiCapM(config.oiMaxCapM, underlying);
+    const oiOk = (t) => !config.oiFilterEnabled || !isOiBlocked(t, oiCapM);
     // For Call: ATM or OTM means strike >= atmStrike
-    const callTickers = allTickers.filter(t => t.type === 'call' && (atmStrike === null || t.strike >= atmStrike));
+    const callTickers = allTickers.filter(t => t.type === 'call' && (atmStrike === null || t.strike >= atmStrike) && oiOk(t));
     // For Put: ATM or OTM means strike <= atmStrike
-    const putTickers = allTickers.filter(t => t.type === 'put' && (atmStrike === null || t.strike <= atmStrike));
+    const putTickers = allTickers.filter(t => t.type === 'put' && (atmStrike === null || t.strike <= atmStrike) && oiOk(t));
 
     // Find the best price for a given strike + option type, falling back to the
     // nearest available strike within a tight tolerance (used for ATM scaling).
@@ -588,7 +640,7 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
       const updates = typeof keyOrObj === 'object' ? keyOrObj : { [keyOrObj]: value };
       const newConfig = { ...c, ...updates };
       try {
-        localStorage.setItem('vitti_algo_config', JSON.stringify(newConfig));
+        localStorage.setItem(SCANNER_CONFIG_KEY, JSON.stringify(newConfig));
       } catch (err) {
         console.error('Failed to save config to localStorage:', err);
       }
@@ -672,6 +724,9 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             </button>
           </div>
 
+          {/* Saved settings · + Save · Send to window · Reset */}
+          <ScannerFilterToolbar config={config} updateConfig={updateConfig} />
+
           <div className="hide-mobile" style={{ width: 1, height: 24, backgroundColor: 'var(--border)' }}></div>
 
           <div className={`scanner-filters-container ${isFiltersCollapsed ? 'collapsed' : 'expanded'}`}>
@@ -750,27 +805,98 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
                 onChange={e => updateConfig('minAtmRoi', Number(e.target.value))}
               />
             </div>
-            <div key="atmRatioScaling" className="form-group row-inline" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <input type="checkbox" id="atmRatioScaling" checked={config.atmRatioScaling ?? false}
-                onChange={e => updateConfig('atmRatioScaling', e.target.checked)} />
-              <label htmlFor="atmRatioScaling" style={{ cursor: 'pointer', userSelect: 'none' }}>Dynamic ATM Scaling</label>
+            {/* Dynamic ATM Scaling + its call / put scaling */}
+            <div className="scanner-filter-group">
+              <div key="atmRatioScaling" className="form-group row-inline scanner-switch-field">
+                <label htmlFor="atmRatioScaling" style={{ cursor: 'pointer', userSelect: 'none' }}>Dynamic ATM Scaling</label>
+                <label className="pt-switch" title="Scale the short qty toward the ATM ratio">
+                  <input type="checkbox" id="atmRatioScaling" checked={config.atmRatioScaling ?? false}
+                    onChange={e => updateConfig('atmRatioScaling', e.target.checked)} />
+                  <span className="pt-slider"></span>
+                </label>
+              </div>
+              {config.atmRatioScaling && (
+                <>
+                  <div key="atmRatioPctCall" className="form-group row-inline">
+                    <label>Call Scaling</label>
+                    <CustomInput type="number" step="5" suffix="%" showStepper width={100} value={config.atmRatioPctCall ?? 50}
+                      onChange={e => updateConfig('atmRatioPctCall', Number(e.target.value))}
+                    />
+                  </div>
+                  <div key="atmRatioPctPut" className="form-group row-inline">
+                    <label>Put Scaling</label>
+                    <CustomInput type="number" step="5" suffix="%" showStepper width={100} value={config.atmRatioPctPut ?? 50}
+                      onChange={e => updateConfig('atmRatioPctPut', Number(e.target.value))}
+                    />
+                  </div>
+                </>
+              )}
             </div>
-            {config.atmRatioScaling && (
-              <>
-                <div key="atmRatioPctCall" className="form-group row-inline">
-                  <label>Call Scaling</label>
-                  <CustomInput type="number" step="5" suffix="%" showStepper width={100} value={config.atmRatioPctCall ?? 50}
-                    onChange={e => updateConfig('atmRatioPctCall', Number(e.target.value))}
+            {/* Hedge Leg + its lot / max price / IV diff */}
+            <div className="scanner-filter-group">
+              <div key="hedgeEnabled" className="form-group row-inline scanner-switch-field">
+                <label htmlFor="hedgeEnabled" style={{ cursor: 'pointer', userSelect: 'none' }}>Hedge Leg</label>
+                <label className="pt-switch" title="Show each spread's 3rd long (hedge) leg">
+                  <input type="checkbox" id="hedgeEnabled" checked={config.hedgeEnabled ?? false}
+                    onChange={e => updateConfig('hedgeEnabled', e.target.checked)} />
+                  <span className="pt-slider"></span>
+                </label>
+              </div>
+              {config.hedgeEnabled && (
+                <div key="hedgeLotPct" className="form-group row-inline">
+                  <label>Hedge Lot</label>
+                  <CustomInput type="number" step="5" min="0" max="100" suffix="%" showStepper width={100} value={config.hedgeLotPct ?? 50}
+                    onChange={e => updateConfig('hedgeLotPct', Number(e.target.value))}
                   />
                 </div>
-                <div key="atmRatioPctPut" className="form-group row-inline">
-                  <label>Put Scaling</label>
-                  <CustomInput type="number" step="5" suffix="%" showStepper width={100} value={config.atmRatioPctPut ?? 50}
-                    onChange={e => updateConfig('atmRatioPctPut', Number(e.target.value))}
+              )}
+              {config.hedgeEnabled && (
+                <>
+                  <div key="hedgeMaxPrice" className="form-group row-inline">
+                    <label>Max Hedge Price</label>
+                    <CustomInput type="number" step="1" min="0" prefix="$" showStepper width={100} value={config.hedgeMaxPrice ?? 10}
+                      onChange={e => updateConfig('hedgeMaxPrice', Number(e.target.value))}
+                    />
+                  </div>
+                  <div key="hedgeIvDiffMin" className="form-group row-inline">
+                    <label>Hedge IV Diff</label>
+                    <CustomInput type="number" step="0.5" min="0" suffix="%" showStepper width={90} value={config.hedgeIvDiffMin ?? 0}
+                      onChange={e => updateConfig('hedgeIvDiffMin', Number(e.target.value))}
+                    />
+                    <span style={{ margin: '0 4px' }}>to</span>
+                    <CustomInput type="number" step="0.5" min="0" suffix="%" showStepper width={90} value={config.hedgeIvDiffMax ?? 2}
+                      onChange={e => updateConfig('hedgeIvDiffMax', Number(e.target.value))}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+            {/* Open Interest (Delta OI limit) + its cap */}
+            <div className="scanner-filter-group">
+              <div key="oiFilterEnabled" className="form-group row-inline scanner-switch-field">
+                <label htmlFor="oiFilterEnabled" style={{ cursor: 'pointer', userSelect: 'none' }}
+                  title="Delta's contract-level OI limit: a strike whose open interest reaches the cap goes reduce-only (no new positions). On: hide spreads with a leg on a strike that is locked or whose OI (USD) is at/over the cap.">
+                  Open Interest
+                </label>
+                <label className="pt-switch" title="Hide spreads on strikes at/over the OI cap or locked by Delta">
+                  <input type="checkbox" id="oiFilterEnabled" checked={config.oiFilterEnabled ?? false}
+                    onChange={e => updateConfig('oiFilterEnabled', e.target.checked)} />
+                  <span className="pt-slider"></span>
+                </label>
+              </div>
+              {config.oiFilterEnabled && (
+                <div key="oiMaxCapM" className="form-group row-inline">
+                  <label>Max OI</label>
+                  <CustomInput type="number" step="1" min="1" prefix="$" suffix="M" showStepper width={100}
+                    value={config.oiMaxCapM ?? defaultOiCapM(underlying)}
+                    onChange={e => {
+                      const n = Number(e.target.value);
+                      updateConfig('oiMaxCapM', e.target.value === '' || !(n > 0) ? null : n);
+                    }}
                   />
                 </div>
-              </>
-            )}
+              )}
+            </div>
           </div>
           {/* Actions for Start/Stop Scan button */}
           <div>

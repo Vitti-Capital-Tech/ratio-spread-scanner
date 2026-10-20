@@ -1,0 +1,38 @@
+// Ratio Spread Scanner filter defaults. The scanner's config (localStorage
+// `vitti_algo_config`) starts from SCANNER_DEFAULTS; Reset returns every field to it.
+export const SCANNER_DEFAULTS = {
+  minStrikeDiff: 0,
+  minIvDiff: 0,
+  maxRatioDeviation: 0,
+  minSellPremium: 0,
+  maxNetPremium: 0,
+  minLongDist: 0,
+  maxSellQty: 0,
+  // ATM Edge (P&L) column floors — keep only spreads whose at-ATM P&L and ROI clear
+  // these minimums. Applied live in ResultTable against the ATM-priced P&L/ROI.
+  minAtmPnl: 0,
+  minAtmRoi: 0,
+  atmRatioScaling: false,
+  atmRatioPctCall: 0,
+  atmRatioPctPut: 0,
+  // Hedge leg — each spread's 3rd long: beyond the short, the strike nearest it whose
+  // price is below hedgeMaxPrice and whose |IV − short IV| is in [hedgeIvDiffMin,
+  // hedgeIvDiffMax]; sized as short qty × hedgeLotPct. The same leg paper trading adds
+  // when its window's Hedge toggle is on.
+  hedgeEnabled: false,
+  hedgeLotPct: 50,
+  hedgeMaxPrice: 10,
+  hedgeIvDiffMin: 0,
+  hedgeIvDiffMax: 2,
+  // Delta's contract-level OI limit (from 14 Oct 2026): with the toggle on, spreads with a leg
+  // on a strike whose OI (USD) is at/over the cap — or that Delta has locked (reduce-only) —
+  // are hidden. oiMaxCapM is in millions; null = the underlying's default (BTC 15, ETH 10).
+  oiFilterEnabled: false,
+  oiMaxCapM: null,
+};
+
+// The scanner's live filter config, per browser.
+export const SCANNER_CONFIG_KEY = 'vitti_algo_config';
+
+// The user's saved filter settings (full snapshots of every SCANNER_DEFAULTS key), per browser.
+export const SAVED_SETTINGS_KEY = 'vitti_scanner_presets_v1';
