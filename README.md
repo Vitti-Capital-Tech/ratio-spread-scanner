@@ -41,7 +41,7 @@ The WebSocket connects directly to `wss://socket.india.delta.exchange`.
 
 1. Pick the underlying (BTC or ETH) and an expiry.
 2. Set the filters, or apply a saved setting.
-3. Click **Start Scan**. The Call and Put tabs fill in and update live.
+3. Click **Start Scan**. The Call and Put tabs fill in and update live. If you change the underlying, expiry or saved setting while a scan is running, the scan restarts on the new market by itself.
 4. Expand a long strike to see the alternate short strikes. Hover cells for the ATM pricing details and OI breakdown.
 
 ## Browser storage

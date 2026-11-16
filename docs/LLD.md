@@ -100,7 +100,8 @@ The saved config is merged over `SCANNER_DEFAULTS` on load, so keys added later 
 4. **REST backfill**: `getTickers` fills the cache. If a quote has a bid or ask, `bidUpdatedAt` / `askUpdatedAt` are set to `Date.now()` so the quote counts as fresh right away.
 5. **Stream**: `createTickerStream` subscribes to every symbol. Each message is normalised (IV to percent, OI fields, delta notional) into `tickerBufferRef`. A missing field keeps its previous buffered value.
 6. **Flush**: a 50 ms timer merges the buffer into `latestTickerDataRef` and React state.
-7. **Scan trigger**: the scan runs if it has never run, or if at least 2000 ms have passed since the last one. A config change sets `force` and skips the throttle.
+7. **Market switch while scanning**: changing the underlying or expiry (from the dropdowns or by applying a saved setting) goes through `switchMarket`. It stops the scan and sets `resumeScanRef`. An effect then calls `startScan` again once `productsForRef` matches the new underlying and its expiries contain the selected expiry. The spot is cleared on an underlying change, and `scanIdRef` makes an older `startScan` that is still awaiting its REST backfill exit without touching the cache or opening a stream.
+8. **Scan trigger**: the scan runs if it has never run, or if at least 2000 ms have passed since the last one. A config change sets `force` and skips the throttle.
 
 ## 4. `computeSpreads`
 
