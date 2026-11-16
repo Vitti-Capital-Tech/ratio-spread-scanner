@@ -20,9 +20,11 @@ This document covers the algorithms, formulas, data shapes and storage behind th
 | | `publishTopSpreads` | Top 3 unique long strikes per side, written to storage and broadcast |
 | | `updateConfig(key, value)` | Update config and persist it to `vitti_algo_config` |
 | `src/ResultTable.jsx` | `resolveTickerPrice` | Same lookup as `getTickerPrice`, plus detail for tooltips |
-| | `filteredResults` (memo) | ATM P&L, cap, leverage, hedge choice, margin, ROI, floors |
-| | `HedgeLine` | Shows the top 2 hedge options by ATM ROI |
+| | `filteredResults` (memo) | ATM P&L, notional sizing, leverage, hedge pricing, margin, ROI, floors |
+| | `HedgeLine` | Shows the row's hedge (`H: +strike @ $price × qty`) |
 | `src/scannerUtils.js` | `leverageFor(symbolOrUnderlying, expiry?, now?)` | Short-leg leverage |
+| | `shortNotionalCap(symbolOrUnderlying, expiry?, now?)` | Target short notional: $195k at 200x, $95k at 100x |
+| | `scaleSellQtyToAtm(baseSellQty, atmRatioVal, pct)` | ATM ratio scaling of the short qty |
 | | `listHedgeStrikes(...)` | All qualifying hedge strikes, nearest first |
 | | `defaultOiCapM`, `effectiveOiCapM`, `isOiBlocked` | OI-limit gate |
 | | `normalizeIv`, `toFiniteNumber`, `matchesOptionType` | Parsing helpers |
@@ -58,27 +60,29 @@ This document covers the algorithms, formulas, data shapes and storage behind th
   scaledSellQty,    // after ATM ratio scaling
   atmRatio, buyIntrinsic, sellIntrinsic,
   buyPrice, sellPrice, buyIv, sellIv,
-  netPremium,       // 2-leg, or 3-leg for the provisional hedge
+  netPremium,       // 2-leg, or 3-leg with the hedge
   deltaDiff, netDelta3,
-  hedge,            // provisional: nearest qualifying option, or null
-  hedgeOptions: [{ strike, price, iv, deltaNotional, unitQty, netPremium, netDelta3 }]
+  hedge             // nearest qualifying option within Max Debit, or null:
+                    // { strike, price, iv, deltaNotional, unitQty, netPremium, netDelta3 }
 }
 ```
 
 ### 2.3 Config (`SCANNER_DEFAULTS`)
 
-| Key | Default here | Meaning |
-| --- | --- | --- |
-| `minStrikeDiff` | 0 | Min \|sell strike − buy strike\| |
-| `minIvDiff` | 0 | Min \|buy ask IV − sell bid IV\| |
-| `maxRatioDeviation` | 0 | Max \|premium ratio − delta ratio\| / delta ratio |
-| `minSellPremium` | 0 | Min short bid |
-| `maxNetPremium` | 0 | Max net debit (after scaling and hedge) |
-| `minLongDist` | 0 | Min \|long strike − spot\| |
-| `maxSellQty` | 0 | Max base sell ratio (`0` is treated as 10) |
-| `minAtmPnl` / `minAtmRoi` | 0 | ATM floors, used only when `atmRatioScaling` is on |
-| `atmRatioScaling` | false | Turns on ATM ratio scaling |
-| `atmRatioPctCall` / `atmRatioPctPut` | 0 | Scaling % toward the ATM ratio |
+The first nine defaults are deliberately `0` in this repo. Option Scope's values are listed for reference. Everything else matches Option Scope.
+
+| Key | Default here | Option Scope | Meaning |
+| --- | --- | --- | --- |
+| `minStrikeDiff` | 0 | 800 | Min \|sell strike − buy strike\| |
+| `minIvDiff` | 0 | 5 | Min \|buy ask IV − sell bid IV\| |
+| `maxRatioDeviation` | 0 | 0.25 | Max \|premium ratio − delta ratio\| / delta ratio |
+| `minSellPremium` | 0 | 10 | Min short bid |
+| `maxNetPremium` | 0 | 20 | Max net debit (after scaling and hedge) |
+| `minLongDist` | 0 | 500 | Min \|long strike − spot\| |
+| `maxSellQty` | 0 | 10 | Max base sell ratio (`0` is treated as 10) |
+| `atmRatioPctCall` / `atmRatioPctPut` | 0 | 50 | Scaling % (see §6.1) |
+| `minAtmPnl` / `minAtmRoi` | 0 | 0 | ATM floors, used only when `atmRatioScaling` is on |
+| `atmRatioScaling` | false | false | Turns on ATM ratio scaling |
 | `hedgeEnabled` | false | Hedge leg toggle |
 | `hedgeLotPct` | 50 | Hedge qty as % of the scaled short qty |
 | `hedgeMaxPrice` | 10 | Hedge ask must be below this |
@@ -138,9 +142,20 @@ sellIntrinsic = price(ATM ± strikeDiff, type, 'ask')      // + for calls, − f
 atmRatio      = buyIntrinsic / sellIntrinsic
 if atmRatioScaling and atmRatio known:
   r    = round(atmRatio / 0.25) × 0.25
-  diff = max(0, r − sellQty)
-  scaledSellQty = max(sellQty, round((sellQty + pct/100 × diff) / 0.25) × 0.25)
+  scaledSellQty = scaleSellQtyToAtm(sellQty, r, pct)
 ```
+
+`scaleSellQtyToAtm(base, r, pct)`:
+
+```
+diff = r − base
+if diff > 0:  qty = base + pct/100 × diff                  // move toward the ATM ratio
+if diff = 0:  qty = base × (1 + p/100)                     // p = pct > 100 ? pct − 100 : pct
+if diff < 0:  qty = base
+scaledSellQty = max(base, round(qty / 0.25) × 0.25)
+```
+
+For example, with base 2 and an ATM ratio of 2, Call Scaling 350% applies +250% and gives 7. The input's hover text explains the rule.
 
 `pct` is `atmRatioPctCall` or `atmRatioPctPut`.
 
@@ -156,13 +171,16 @@ if atmRatioScaling and atmRatio known:
 
 ```
 shortValue = spot × totalSellQty × lotSize
-if shortValue ≥ 195 000:
-  scale = 195 000 / shortValue
-  adjustedLotSize = lotSize × scale
-  adjustedSellQty = totalSellQty × scale
-  shortValue = 195 000
-leverage = leverageFor(buyLeg.symbol)
+cap = shortNotionalCap(sellLeg.symbol)      // 195 000 at 200x, 95 000 at 100x
+if shortValue > 0:                          // scales DOWN above the cap, UP below it
+  scale = cap / shortValue
+  adjustedLotSize = round2(lotSize × scale)
+  adjustedSellQty = round2(totalSellQty × scale)
+  shortValue = cap
+leverage = leverageFor(sellLeg.symbol)
 ```
+
+Every row is shown at the same short notional, which uses the full margin for that leverage. Both the cap and the leverage are read from the short leg's symbol.
 
 `leverageFor` works as follows:
 
@@ -214,14 +232,14 @@ netPremium = scaledSellQty × sellPrice − buyPrice − unitQty × hedgePrice
 netDelta3  = buyDN − scaledSellQty × sellDN + unitQty × hedgeDN
 ```
 
-Only options with `netPremium ≥ −maxNetPremium` are kept. The nearest one is the provisional `hedge`.
+Only options with `netPremium ≥ −maxNetPremium` are kept. The nearest one becomes the row's `hedge`, whatever its ATM ROI. This is the same choice paper trading makes. If none is left, the pair is dropped.
 
-### 7.2 Choosing the hedge and pricing it (in `ResultTable`)
+### 7.2 Pricing the hedge (in `ResultTable`)
 
-For each option `h`:
+For the row's hedge `h`:
 
 ```
-qty      = adjustedSellQty × hedgeLotPct / 100              // after the $195k cap
+qty      = adjustedSellQty × hedgeLotPct / 100              // after notional sizing
 offset   = h.strike − buyLeg.strike
 atAtm    = bid at (ATM + offset)                             // unquoted → 0 (premium lost)
 pnl      = (legsPnl + (atAtm − h.price) × totalSellQty × hedgePct) × adjustedLotSize
@@ -229,7 +247,7 @@ margin   = baseMargin + h.price × adjustedSellQty × hedgePct
 roi      = pnl / margin × 100
 ```
 
-The row uses the option with the highest ROI, with ATM P&L as the tie-break. If no option can be priced, the first (nearest) option is used. That option's P&L, margin, ROI, net premium and `netDelta3` replace the 2-leg values. `HedgeLine` lists the top 2 by ROI, with ✓ marking the chosen one.
+The hedge's P&L, margin, ROI, net premium and `netDelta3` replace the 2-leg values. `HedgeLine` shows it under the strikes as `H: +strike @ $price × qty`, and its tooltip shows the IV and the value at ATM.
 
 ## 8. Table layout
 
@@ -242,11 +260,14 @@ The row uses the option with the highest ROI, with ATM P&L as the tie-break. If 
 
 ## 9. Saved settings and dialogs
 
-- `vitti_scanner_presets_v1` holds `[{ name, values }]`, where `values` is a full snapshot of every `SCANNER_DEFAULTS` key.
-- **Apply** writes each value through `updateConfig` and remembers the applied name. Once any filter changes, that chip is marked as modified and shows **⟳ Update**.
+- `vitti_scanner_presets_v1` holds `[{ name, values, underlying, expiry }]`. `values` is a full snapshot of every `SCANNER_DEFAULTS` key, and `underlying` and `expiry` record the market it was saved on.
+- A chip shows its underlying. It is **active** only when the filters match and the current underlying and expiry match too.
+- **Apply** writes each value through `updateConfig`, calls `onApplyMarket(underlying, expiry)` to open that market (an expiry that has passed falls back to the nearest), and remembers the applied name. Once any filter changes, that chip is marked as modified and shows **⟳ Update**.
+- `ScannerFilterToolbar` also accepts `savedKey` and `fmtExpiry`, which Option Scope's Calendar Spread scanner uses. Here they keep their defaults.
+- The last underlying and expiry are stored in `vitti_scanner_market_v1` and reopened on page load.
 - **+ Save** with an existing name, and **Update**, both ask with `showConfirm(...)` first.
 - **Reset** returns every key to `SCANNER_DEFAULTS`.
-- `dialogService` keeps a module-level queue. `showConfirm` returns a `Promise<boolean>`. `AppDialogHost` uses `useSyncExternalStore` to render the head of the queue.
+- `dialogService` keeps a module-level queue. `showConfirm` returns a `Promise<boolean>`, and `showChoice` returns the picked choice's `value` (or `null`). `showChoice` is not used by the scanner and is kept so the file stays identical to Option Scope's. `AppDialogHost` uses `useSyncExternalStore` to render the head of the queue.
 
 ## 10. Cross-tab publish
 
@@ -267,9 +288,12 @@ Stopping the scan publishes an empty payload.
 
 ## 11. Sync rules with Option Scope
 
-- `leverageFor`, `listHedgeStrikes`, `pickHedgeStrike` and the OI helpers are twins of Option Scope's `engine/lib/utils.js`. Change both together.
+- The scanner must behave exactly like Option Scope's Ratio Spread tab. These files are copied from Option Scope as they are: `RatioSpreadScanner.jsx`, `ResultTable.jsx`, `scannerUtils.js`, `index.css`, `components/scanner/*` and `components/common/*`.
+- `leverageFor`, `shortNotionalCap`, `scaleSellQtyToAtm`, `listHedgeStrikes`, `pickHedgeStrike` and the OI helpers are twins of Option Scope's `engine/lib/utils.js`. Change both together.
 - The ATM bracket tolerance (BTC 1000, ETH 50) also matches the engine's `getTickerPrice`.
-- When porting from Option Scope, keep these local differences:
-  - The filter defaults are `0`.
-  - There is no `SendToWindow`.
-  - There are no order-book helpers in `api.js`.
+- After copying, re-apply only these local differences:
+  - In `scannerDefaults.js`, set `minStrikeDiff`, `minIvDiff`, `maxRatioDeviation`, `minSellPremium`, `maxNetPremium`, `minLongDist`, `maxSellQty`, `atmRatioPctCall` and `atmRatioPctPut` to `0` (deliberate).
+  - The Navbar import is `./components/RatioSpreadScanner/Navbar`, and the Navbar has only the Ratio Spread tab.
+  - Remove `onSendToWindow`, `SendToWindow` and `loadScannerFilterSources`.
+  - Keep `api.js` without Option Scope's order-book helpers.
+  - Keep `main.jsx` as a single scanner page.

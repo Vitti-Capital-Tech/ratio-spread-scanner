@@ -5,6 +5,10 @@ import {
 } from './api';
 
 const UNDERLYINGS = ['BTC', 'ETH'];
+// Call / Put Scaling as applied: up to 100 as entered; above 100 the entered value minus 100
+// (350 → 250%). The input keeps showing what was entered.
+// Hover text for the call/put scaling inputs (rule: scaleSellQtyToAtm in scannerUtils).
+const scalingHint = (p) => { const n = Number(p) || 0; return `ATM ratio above the strike ratio: ${n}% of the gap. Equal: +${n > 100 ? n - 100 : n}% on the ratio.`; };
 const SCANNER_TOP_KEY = 'vitti_scanner_top_spreads_v1';
 // Last underlying + expiry, so a page refresh reopens the market the filters were set for.
 const SCANNER_MARKET_KEY = 'vitti_scanner_market_v1';
@@ -16,7 +20,7 @@ const loadMarket = () => {
 };
 
 import ResultTable from './ResultTable';
-import { normalizeIv, toFiniteNumber, matchesOptionType, listHedgeStrikes, defaultOiCapM, effectiveOiCapM, isOiBlocked } from './scannerUtils';
+import { normalizeIv, toFiniteNumber, matchesOptionType, listHedgeStrikes, defaultOiCapM, effectiveOiCapM, isOiBlocked, scaleSellQtyToAtm } from './scannerUtils';
 import Navbar from './components/RatioSpreadScanner/Navbar';
 import CustomSelect from './components/common/CustomSelect';
 import CustomInput from './components/common/CustomInput';
@@ -401,8 +405,8 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
       const hedgePool = config.hedgeEnabled ? sorted.filter(t => (t.ask ?? 0) > 0) : [];
       // Every qualifying hedge for a pair (listHedgeStrikes — same rule as paper trading):
       // strikes beyond the short from one strike step up to (width − one step) away, under
-      // Max Hedge Price and inside the IV-diff range. ResultTable prices each at ATM and uses
-      // the best ROI one for the row; all are listed under it.
+      // Max Hedge Price and inside the IV-diff range, nearest the short first. The row uses the
+      // nearest one within Max Debit (regardless of ATM ROI); only that one is shown.
       const hedgeOptionsFor = (buyLeg, sellLeg, shortQty, width) => {
         if (!config.hedgeEnabled || !(config.hedgeLotPct > 0)) return [];
         const pool = hedgePool.filter(t => t !== buyLeg && t !== sellLeg);
@@ -497,8 +501,7 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
           if (config.atmRatioScaling && atmRatio != null) {
             const pct = buyLeg.type === 'call' ? config.atmRatioPctCall : config.atmRatioPctPut;
             const atmRatioVal = Math.round(atmRatio / 0.25) * 0.25;
-            const diff = Math.max(0, atmRatioVal - sellQty);
-            scaledSellQty = Math.max(sellQty, Math.round((sellQty + (pct / 100) * diff) / 0.25) * 0.25);
+            scaledSellQty = scaleSellQtyToAtm(sellQty, atmRatioVal, pct);
           }
 
           // Hedge leg (when the toggle is on and the strike exists). Net premium and net
@@ -514,7 +517,7 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             }))
             .filter(h => h.netPremium >= -config.maxNetPremium);
           if (config.hedgeEnabled && hedgeOptions.length === 0) continue;
-          // Provisional: nearest option (ResultTable switches to the best ATM ROI one).
+          // The nearest option within Max Debit — what ResultTable and paper trading use.
           const hedge = hedgeOptions[0] ?? null;
 
           // Max-debit (maxNetPremium) check on the post-scaling net premium.
@@ -543,8 +546,7 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             netPremium: netPrem.toFixed(2),
             deltaDiff,
             netDelta3,
-            hedge,
-            hedgeOptions
+            hedge
           });
         }
       }
@@ -767,7 +769,7 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
             </button>
           </div>
 
-          {/* Saved settings · + Save · Send to window · Reset */}
+          {/* Saved settings · + Save · Reset */}
           <ScannerFilterToolbar config={config} updateConfig={updateConfig}
             underlying={underlying} expiry={selExpiry} onApplyMarket={applyMarket} />
 
@@ -865,12 +867,14 @@ export default function RatioSpreadScanner({ onNavigate, theme, toggleTheme }) {
                     <label>Call Scaling</label>
                     <CustomInput type="number" step="5" suffix="%" showStepper width={100} value={config.atmRatioPctCall ?? 50}
                       onChange={e => updateConfig('atmRatioPctCall', Number(e.target.value))}
+                      title={scalingHint(config.atmRatioPctCall ?? 50)}
                     />
                   </div>
                   <div key="atmRatioPctPut" className="form-group row-inline">
                     <label>Put Scaling</label>
                     <CustomInput type="number" step="5" suffix="%" showStepper width={100} value={config.atmRatioPctPut ?? 50}
                       onChange={e => updateConfig('atmRatioPctPut', Number(e.target.value))}
+                      title={scalingHint(config.atmRatioPctPut ?? 50)}
                     />
                   </div>
                 </>

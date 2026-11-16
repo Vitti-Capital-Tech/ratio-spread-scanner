@@ -9,11 +9,12 @@ This is the standalone version of the **Ratio Spread** tab from Option Scope. It
 - **Live data**: a REST snapshot of `/v2/tickers` at start, then the Delta `v2/ticker` WebSocket stream. Ticks are buffered for 50 ms, and spreads are recomputed at most every 2 s (or immediately when a filter changes).
 - **Entry filters**: min strike diff, min IV diff, max ratio deviation, min sell premium, max net debit, min long distance from spot, and max sell ratio. Both legs must have quotes no older than 120 s.
 - **Delta-neutral sizing**: short qty = long delta notional ÷ short delta notional, rounded to 0.25.
-- **ATM ratio scaling** (optional): scales the short qty toward the ATM premium ratio by a call or put %. Also turns on the **Min ATM P&L** and **Min ATM ROI** floors.
-- **ATM edge**: P&L, required margin and ROI if spot reaches the long strike. Short notional is capped at $195,000, with leverage by underlying and expiry: BTC 200x and ETH 100x at DTE 0–1, and at most 100x for later expiries.
-- **Hedge leg** (optional): a 3rd long beyond the short, sized as scaled short qty × Hedge Lot %. Qualifying strikes are under Max Hedge Price and inside the Hedge IV Diff range. The top 2 by ATM ROI are listed, and the best one is used in the row's numbers. With the toggle on, only hedged spreads are shown.
+- **ATM ratio scaling** (optional): when the ATM premium ratio is above the strike ratio, the short qty moves toward it by a call or put %. When the two are equal, the short qty is increased by that % (entries above 100 count as the value minus 100). Also turns on the **Min ATM P&L** and **Min ATM ROI** floors.
+- **ATM edge**: P&L, required margin and ROI if spot reaches the long strike. Every row is sized to the same short notional: $195,000 at 200x leverage, $95,000 at 100x. Rows are scaled up or down to hit it. Leverage depends on the underlying and expiry: BTC 200x and ETH 100x at DTE 0–1, and at most 100x for later expiries.
+- **Hedge leg** (optional): a 3rd long beyond the short, sized as scaled short qty × Hedge Lot %. Qualifying strikes are under Max Hedge Price and inside the Hedge IV Diff range, and must keep the net premium within Max Net Debit. The row uses the one nearest the short, the same choice paper trading makes. With the toggle on, only hedged spreads are shown.
 - **Open interest limit** (optional): hides spreads with a leg on a strike that Delta has made reduce-only, or whose OI is at or over Max OI. The default cap is BTC $15M and ETH $10M. The table shows an **OI (L/S)** column, with 🔒 on locked strikes.
-- **Saved filter settings**: save, apply, update, delete or reset full filter snapshots from the toolbar. Confirmations use an in-app dialog.
+- **Saved filter settings**: save, apply, update, delete or reset full filter snapshots from the toolbar. Each setting also remembers the underlying and expiry it was saved on, and applying it opens that market (an expired date falls back to the nearest one). Confirmations use an in-app dialog.
+- **Remembers the market**: the last underlying and expiry are reopened after a page refresh.
 - Results are grouped by long strike, with alternate shorts sorted by ROI. Light and dark themes are supported, and the layout works on mobile.
 
 ## Tech stack
@@ -48,7 +49,8 @@ The WebSocket connects directly to `wss://socket.india.delta.exchange`.
 | Key | Contents |
 | --- | --- |
 | `vitti_algo_config` | Current filter config |
-| `vitti_scanner_presets_v1` | Saved filter settings |
+| `vitti_scanner_presets_v1` | Saved filter settings, each with its underlying and expiry |
+| `vitti_scanner_market_v1` | Last underlying and expiry |
 | `vitti_scanner_top_spreads_v1` | Top 3 call and put spreads from the last scan, also sent on the `option-scope-sync` BroadcastChannel |
 | `theme` | `dark` or `light` |
 
@@ -74,10 +76,12 @@ docs/
 
 ## Keeping in sync with Option Scope
 
-This repo mirrors the Ratio Spread tab in Option Scope. `scannerUtils.js` (leverage, `listHedgeStrikes` and the OI helpers) must match Option Scope's engine copies, so that the margin and ROI shown here are the same numbers its paper and live engines use.
+This repo mirrors the Ratio Spread tab in Option Scope and must behave the same way. The scanner files (`RatioSpreadScanner.jsx`, `ResultTable.jsx`, `scannerUtils.js`, `index.css`, `components/scanner/*`, `components/common/*`) are copied from Option Scope as they are, except for the filter defaults. `scannerUtils.js` (leverage, notional cap, ATM scaling, `listHedgeStrikes` and the OI helpers) must also match Option Scope's engine copies, so that the margin and ROI shown here are the same numbers its paper and live engines use.
 
-When you port changes, keep these deliberate differences:
+When you port changes, keep only these differences:
 
-- The filter defaults in `scannerDefaults.js` are all `0`.
-- There is no **Send to Window** button, because this repo has no Supabase or paper trading.
+- The filter defaults in `scannerDefaults.js` (strike diff, IV diff, ratio deviation, sell premium, net debit, long distance, max ratio, call and put scaling) are deliberately all `0`. Option Scope uses 800, 5, 0.25, 10, 20, 500, 10 and 50.
+- `Navbar.jsx` lives in `components/RatioSpreadScanner/` (Option Scope uses `components/PaperTrading/`) and has only the Ratio Spread tab.
+- There is no **Send to Window** button (`SendToWindow.jsx`, `onSendToWindow`, `loadScannerFilterSources`), because this repo has no Supabase or paper trading.
 - Order-book helpers from Option Scope's Trade tab are not included in `api.js`.
+- `main.jsx` renders only the scanner page.

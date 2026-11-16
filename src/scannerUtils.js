@@ -24,8 +24,8 @@ export function formatDateTime(d) {
  *
  * `underlyingOrSymbol`: the underlying ('ETH') or a full Delta symbol ('C-ETH-2800-030926').
  * `expiry`: the settlement time (ISO) or a symbol; omitted → read from `underlyingOrSymbol`
- * when it is a symbol. No expiry known → the full leverage (previous behaviour). The $195,000
- * short-notional cap is NOT per-underlying — it stays the same for both.
+ * when it is a symbol. No expiry known → the full leverage (previous behaviour). The short-
+ * notional cap follows the leverage (shortNotionalCap: 200x → $195k, 100x → $95k).
  */
 export const NEAR_EXPIRY_HOURS = 48;   // DTE 0 and DTE 1
 export const FAR_EXPIRY_MAX_LEVERAGE = 100;
@@ -44,6 +44,14 @@ export function leverageFor(underlyingOrSymbol, expiry = null, nowMs = Date.now(
   const expMs = expiryMsOf(expiry ?? underlyingOrSymbol);
   if (expMs == null) return full;
   return (expMs - nowMs) < NEAR_EXPIRY_HOURS * 3600000 ? full : Math.min(full, FAR_EXPIRY_MAX_LEVERAGE);
+}
+
+/**
+ * Short-notional cap for a ratio spread, tied to the leverage: 200x → $195,000, 100x (ETH, or
+ * an expiry beyond DTE 1) → $95,000. Same arguments as leverageFor.
+ */
+export function shortNotionalCap(underlyingOrSymbol, expiry = null, nowMs = Date.now()) {
+  return leverageFor(underlyingOrSymbol, expiry, nowMs) >= 200 ? 195000 : 95000;
 }
 
 /**
@@ -102,10 +110,14 @@ export function effectiveOiCapM(capM, underlying) {
   const n = Number(capM);
   return capM != null && capM !== '' && Number.isFinite(n) && n > 0 ? n : defaultOiCapM(underlying);
 }
-/** True when no new leg may be opened on this ticker: Delta locked it, or OI ≥ cap. Unknown OI → allowed. */
+/**
+ * True when no new leg may be opened on this ticker: Delta locked it, or OI ≥ cap.
+ * capM null = Delta's lock only (OI filter mode 'lock', migration 065). Unknown OI → allowed.
+ */
 export function isOiBlocked(t, capM) {
   if (!t) return false;
   if (t.oiLocked === true) return true;
+  if (capM == null) return false;
   const oi = Number(t.oiUsd);
   return t.oiUsd != null && Number.isFinite(oi) && oi >= Number(capM) * 1e6;
 }
@@ -157,4 +169,98 @@ export function matchesOptionType(product, optionType) {
   return product?.contract_type === wanted
     || product?.contract_types === wanted
     || (optionType === 'call' ? /^C-/.test(product?.symbol || '') : /^P-/.test(product?.symbol || ''));
+}
+
+/**
+ * Expiry the account trades (paper expiry mode — see expiryModeForDte). `expiries` = sorted
+ * settlement_time ISO strings. Delta settles at 12:00 UTC (17:30 IST), so the UTC date is
+ * the IST expiry date, and an expiry that has settled drops out — on the Friday 17:30 IST
+ * roll (≈ "from Saturday") the next week's / month's expiry is picked up automatically.
+ *  • 'weekly'  — nearest live expiry on a Friday (that week's Friday expiry).
+ *  • 'monthly' — nearest live expiry on the LAST Friday of its month.
+ *  • 'daily' (default) — nearest live expiry at least `minDte` days out (per-window DTE).
+ * Weekly/monthly fall back to the daily rule when no such expiry is listed.
+ *
+ * Twin of engine/lib/utils.js pickExpiry — keep the two identical.
+ */
+export function pickExpiry(expiries, { mode = 'daily', minDte = 0, nowMs = Date.now() } = {}) {
+  const live = (expiries || []).filter(e => new Date(e).getTime() > nowMs);
+  if (live.length === 0) return (expiries || [])[0] ?? null;
+  const isFriday = (d) => d.getUTCDay() === 5;
+  const isLastFridayOfMonth = (d) => {
+    if (!isFriday(d)) return false;
+    const next = new Date(d.getTime() + 7 * 24 * 60 * 60 * 1000);
+    return next.getUTCMonth() !== d.getUTCMonth();
+  };
+  if (mode === 'weekly' || mode === 'monthly') {
+    const match = mode === 'weekly' ? isFriday : isLastFridayOfMonth;
+    const hit = live.find(e => match(new Date(e)));
+    if (hit) return hit;
+  }
+  for (const e of live) {
+    if ((new Date(e).getTime() - nowMs) / (24 * 60 * 60 * 1000) >= minDte) return e;
+  }
+  return live[0];
+}
+
+/**
+ * Paper expiry mode implied by a window's Days to Expiry: DTE 7 = 'weekly' (that week's
+ * Friday expiry), DTE 30 = 'monthly' (the month's last-Friday expiry), anything else =
+ * 'daily' (nearest expiry at least DTE days out). See pickExpiry.
+ *
+ * Twin of engine/lib/utils.js expiryModeForDte — keep the two identical.
+ */
+export function expiryModeForDte(dte) {
+  const n = Number(dte);
+  if (n === 7) return 'weekly';
+  if (n === 30) return 'monthly';
+  return 'daily';
+}
+
+/**
+ * Excluded strikes (migration 040), tied to the expiry they were excluded on. Entries are
+ * { strike, expiry } with expiry = that expiry's settlement_time, so excluding 78,000 on
+ * today's chain leaves 78,000 open on the next expiry. A bare number (or expiry null), as
+ * stored before this change, still applies to every expiry. Returns de-duplicated entries
+ * sorted by expiry then strike, dropping entries whose expiry has already settled.
+ *
+ * Twin of engine/lib/utils.js normalizeExcludedStrikes / excludedStrikesFor — keep the two identical.
+ */
+export function normalizeExcludedStrikes(list, nowMs = Date.now()) {
+  const out = new Map();
+  for (const e of Array.isArray(list) ? list : []) {
+    const isObj = typeof e === 'object' && e !== null;
+    const strike = Number(isObj ? e.strike : e);
+    if (!Number.isFinite(strike) || strike <= 0) continue;
+    const expiry = isObj && e.expiry ? String(e.expiry) : null;
+    if (expiry && !(new Date(expiry).getTime() > nowMs)) continue; // settled (or invalid) expiry
+    out.set(`${expiry ?? ''}|${strike}`, { strike, expiry });
+  }
+  return [...out.values()].sort((a, b) => (a.expiry ?? '').localeCompare(b.expiry ?? '') || a.strike - b.strike);
+}
+
+/** Strikes no new leg may use on `expiry`: that expiry's entries plus any all-expiry ones. */
+export function excludedStrikesFor(list, expiry) {
+  return new Set(normalizeExcludedStrikes(list)
+    .filter(e => e.expiry == null || e.expiry === expiry)
+    .map(e => e.strike));
+}
+
+/**
+ * ATM-ratio qty scaling (2026-11-12), shared by the scanners and the engine. `atmRatioVal` is the
+ * ATM ratio rounded to 0.25; `pct` the call/put scaling as typed.
+ *  - ATM ratio ABOVE the strike ratio (diff > 0): the short grows by pct% of the gap, pct used
+ *    as typed (130 → 1.3 × gap, 200 → 2 × gap).
+ *  - ATM ratio EQUAL to the strike ratio (diff 0): the short grows by pct% of the strike ratio
+ *    itself, a pct above 100 wrapping to pct − 100 (80 → base × 1.8, 150 → base × 1.5).
+ *  - ATM ratio below the strike ratio: unchanged.
+ * Rounded to 0.25 and never below the base qty.
+ */
+export function scaleSellQtyToAtm(baseSellQty, atmRatioVal, pct) {
+  const p = Number(pct) || 0;
+  const diff = atmRatioVal - baseSellQty;
+  let qty = baseSellQty;
+  if (diff > 1e-9) qty = baseSellQty + (p / 100) * diff;
+  else if (Math.abs(diff) <= 1e-9) qty = baseSellQty * (1 + (p > 100 ? p - 100 : p) / 100);
+  return Math.max(baseSellQty, Math.round(qty / 0.25) * 0.25);
 }

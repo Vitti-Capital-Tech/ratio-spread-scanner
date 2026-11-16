@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { RefreshCw, Target, ChevronRight } from 'lucide-react';
-import { leverageFor } from './scannerUtils';
+import { leverageFor, shortNotionalCap } from './scannerUtils';
 
 // Human-readable explanation of how an ATM intrinsic price was resolved for a target
 // strike — exact listed / bracket-average / single-neighbour / omitted. Rendered as a
@@ -34,29 +34,12 @@ function describeIntrinsic(detail, field) {
 // A fallback (not an exact strike) produced the price → flag it with a "≈" marker.
 const isApproxIntrinsic = (detail) => !!detail && (detail.mode === 'bracket' || detail.mode === 'single');
 
-// Hedge legs (3rd long) under the spread strikes — only when the Hedge toggle is on. The top 2
-// qualifying options by ATM ROI are listed (strikes from one step beyond the short up to width − one step,
-// under Max Hedge Price, inside the IV-diff range, 3-leg net within Max Debit); the ✓ one
-// (best ATM ROI) is what the row's Net Premium / ATM P&L / Margin / ROI use.
-function HedgeLine({ hedge, options }) {
+// Hedge leg (3rd long) under the spread strikes — only when the Hedge toggle is on: the strike
+// nearest the short (from one step beyond it up to width − one step, under Max Hedge Price, inside
+// the IV-diff range, 3-leg net within Max Debit) — same as paper trading. The row's Net Premium /
+// ATM P&L / Margin / ROI include it.
+function HedgeLine({ hedge }) {
   if (!hedge) return null;
-  if (options && options.length > 1) {
-    // Only the top 2 by ATM ROI (the ✓ one first) — the rest are left out to keep rows short.
-    const top = [...options]
-      .sort((a, b) => (b.chosen - a.chosen) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)))
-      .slice(0, 2);
-    return (
-      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.45 }}>
-        {top.map(o => (
-          <div key={o.strike} style={o.chosen ? { fontWeight: 700, color: 'var(--text)' } : undefined}
-            title={`Hedge long ${Number(o.strike).toLocaleString()} @ ${Number(o.price).toFixed(2)}${o.iv != null ? ` (${Number(o.iv).toFixed(1)}% IV)` : ''} × ${o.qty} · net premium ${Number(o.netPremium ?? 0).toFixed(2)}${o.atAtm != null ? ` · worth ${Number(o.atAtm).toFixed(2)} at ATM` : ''}${o.roi != null ? ` · ATM ROI ${o.roi.toFixed(2)}%` : ''}${o.chosen ? ' — used for this row (best ATM ROI)' : ''}`}>
-            H: <span className="scanner-buy">+{Number(o.strike).toLocaleString()}</span> @ ${Number(o.price).toFixed(2)} × {o.qty}
-            {o.roi != null && <> · {o.roi >= 0 ? '+' : ''}{o.roi.toFixed(2)}%</>}{o.chosen ? ' ✓' : ''}
-          </div>
-        ))}
-      </div>
-    );
-  }
   const price = Number(hedge.price);
   return (
     <div
@@ -81,7 +64,11 @@ export default function ResultTable({
   spotPrice,
   lastRefreshed,
   trueAtmStrike,
-  tickerData
+  tickerData,
+  // Optional per-leg price sources { buy, sell } (ticker maps). The Calendar Spread scanner
+  // prices the long at the LONG expiry and the short at the SHORT expiry; without it every
+  // lookup uses tickerData (one expiry — the Ratio Spread scanner).
+  priceSources = null
 }) {
   const [expandedStrikes, setExpandedStrikes] = useState({});
   // Anchored hover tooltip for the ATM intrinsic cells (see renderIntrinsic /
@@ -108,9 +95,10 @@ export default function ResultTable({
    */
   // Resolve the price for a strike AND report how it was resolved (for the tooltip).
   // Returns { price, detail } where detail.mode ∈ exact|bracket|single|none.
-  const resolveTickerPrice = useCallback((strike, optType, priceField) => {
+  const resolveTickerPrice = useCallback((strike, optType, priceField, side = null) => {
     const lowerType = optType.toLowerCase();
-    const allTickers = Object.values(tickerData || {}).filter(t => t.type === lowerType);
+    const source = (side && priceSources?.[side]) || tickerData || {};
+    const allTickers = Object.values(source).filter(t => t.type === lowerType);
     if (!allTickers.length) return { price: null, detail: { mode: 'none', strike } };
 
     // Exact match first
@@ -149,7 +137,7 @@ export default function ResultTable({
     if (pBelow != null && pAbove != null) { price = (pBelow + pAbove) / 2; mode = 'bracket'; }
     else if (pBelow != null || pAbove != null) { price = pBelow ?? pAbove; mode = 'single'; }
     return { price, detail: { mode, strike, tolerance: maxTolerance, below: belowInfo, above: aboveInfo } };
-  }, [tickerData]);
+  }, [tickerData, priceSources]);
 
   // Render an ATM intrinsic cell: the price, a "≈" marker when the value came from the
   // bracket-average / single-neighbour fallback, plus a styled hover card (renderTipContent)
@@ -229,10 +217,10 @@ export default function ResultTable({
     const processedResults = results.map(r => {
       // Use nearest-available strike when exact ATM is missing. Capture the resolution
       // detail (exact/bracket/single/none) so the cell can show a verification tooltip.
-      const buyInfo = resolveTickerPrice(atmStrike, type, 'bid');
+      const buyInfo = resolveTickerPrice(atmStrike, type, 'bid', 'buy');
       const buyIntrinsic = buyInfo.price;                                   // null if unavailable
       const targetSellStrike = type === 'CALL' ? atmStrike + r.strikeDiff : atmStrike - r.strikeDiff;
-      const sellInfo = resolveTickerPrice(targetSellStrike, type, 'ask');
+      const sellInfo = resolveTickerPrice(targetSellStrike, type, 'ask', 'sell');
       const sellIntrinsic = sellInfo.price;                                 // null if unavailable
       const lotSize = r.buyLeg.lotSize || 1;
 
@@ -261,16 +249,24 @@ export default function ResultTable({
       let adjustedSellQty = totalSellQty;
       let scale = 1;
 
-      if (shortValue >= 195000) {
-        scale = 195000 / shortValue;
+      // Size BOTH legs so the short notional equals the cap of the short leg's leverage
+      // (200x → $195k, 100x → $95k): scaled down when above it (BTC), up when below it (ETH's
+      // low spot) — every row is shown at the same notional.
+      const notionalCap = shortNotionalCap(r.sellLeg?.symbol ?? r.buyLeg?.symbol);
+      if (shortValue > 0) {
+        scale = notionalCap / shortValue;
         adjustedLotSize = Number((lotSize * scale).toFixed(2));
         adjustedSellQty = Number((totalSellQty * scale).toFixed(2));
-        shortValue = 195000;
+        shortValue = notionalCap;
       }
 
       // Per underlying + expiry (BTC 200x / ETH 100x at DTE 0–1, farther expiries ≤ 100x) —
       // both read from the leg symbol (…-DDMMYY). Must match engine/lib/utils.js calcMargin().
-      const leverage = leverageFor(r.buyLeg?.symbol);
+      // From the SHORT leg's symbol: the leverage only divides the short value, and a short's
+      // margin follows its own expiry. Same thing for a ratio spread (one expiry); for a
+      // calendar the short sits on the near expiry (200x BTC at DTE 0–1) while the long is on
+      // a far one (≤ 100x), which used to over-state the margin.
+      const leverage = leverageFor(r.sellLeg?.symbol ?? r.buyLeg?.symbol);
 
       // Hedge leg (3rd long): qty = the SCALED short qty (after the $195k / leverage cap)
       // × Hedge Lot %. At ATM it is worth the bid at the ATM-shifted hedge strike (same
@@ -287,7 +283,7 @@ export default function ResultTable({
         const qty = Math.round(adjustedSellQty * hedgePct * 100) / 100;
         const offset = Number(h.strike) - Number(r.buyLeg.strike);
         const atAtm = atmStrike != null
-          ? (resolveTickerPrice(atmStrike + offset, type, 'bid').price ?? 0)
+          ? (resolveTickerPrice(atmStrike + offset, type, 'bid', 'buy').price ?? 0)
           : 0;
         const term = (atAtm - h.price) * totalSellQty * hedgePct;
         const hMargin = h.price * adjustedSellQty * hedgePct;
@@ -295,15 +291,7 @@ export default function ResultTable({
         const m = baseMargin + hMargin;
         return { ...h, qty, atAtm, atAtmPnl: pnl, margin: m, roi: (pnl != null && m > 0) ? (pnl / m) * 100 : null };
       };
-      const pricedOptions = (r.hedgeOptions?.length ? r.hedgeOptions : (r.hedge ? [r.hedge] : [])).map(priceHedge);
-      let hedge = null;
-      for (const o of pricedOptions) {
-        if (!hedge) { hedge = o; continue; }
-        const a = o.roi ?? -Infinity;
-        const b = hedge.roi ?? -Infinity;
-        if (a > b || (a === b && (o.atAtmPnl ?? -Infinity) > (hedge.atAtmPnl ?? -Infinity))) hedge = o;
-      }
-      const hedgeOptions = pricedOptions.map(o => ({ ...o, chosen: o === hedge }));
+      const hedge = r.hedge ? priceHedge(r.hedge) : null;
 
       // Compute P&L scaled to the adjusted lot size
       const atAtmPnl = hedge ? hedge.atAtmPnl : (legsPnl != null ? legsPnl * adjustedLotSize : null);
@@ -337,7 +325,6 @@ export default function ResultTable({
         roundedAtmRatio,
         hasAtmData,
         hedge,
-        hedgeOptions,
         netDelta3: hedge?.netDelta3 ?? r.netDelta3,
       };
     });
@@ -494,7 +481,7 @@ export default function ResultTable({
                                 </span>
                               </div>
                               <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Δ: {bestRow.strikeDiff.toLocaleString()}</div>
-                              <HedgeLine hedge={bestRow.hedge} options={bestRow.hedgeOptions} />
+                              <HedgeLine hedge={bestRow.hedge} />
                             </div>
                           </div>
                         </td>
@@ -577,7 +564,7 @@ export default function ResultTable({
                                   </span>
                                 </div>
                                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Δ: {r.strikeDiff.toLocaleString()}</div>
-                                <HedgeLine hedge={r.hedge} options={r.hedgeOptions} />
+                                <HedgeLine hedge={r.hedge} />
                               </div>
                             </td>
                             <td>

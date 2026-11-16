@@ -58,8 +58,8 @@ flowchart TD
 | --- | --- |
 | `main.jsx` | Mounts the app, owns the light/dark theme, and renders the in-app dialog host |
 | `RatioSpreadScanner.jsx` | Loads products and expiries, polls spot, runs the REST backfill and WebSocket stream, buffers ticks, runs `computeSpreads` (pairing and entry filters), persists config, and publishes the top spreads |
-| `ResultTable.jsx` | Per row: ATM pricing, the $195k cap and leverage, hedge pricing and choice, margin, ROI, and the ATM floors. Groups rows by long strike and renders the table and tooltips |
-| `scannerUtils.js` | Pure helpers: `leverageFor`, `listHedgeStrikes`, the OI-limit helpers, and number and IV normalisation |
+| `ResultTable.jsx` | Per row: ATM pricing, notional sizing and leverage, hedge pricing, margin, ROI, and the ATM floors. Groups rows by long strike and renders the table and tooltips |
+| `scannerUtils.js` | Pure helpers: `leverageFor`, `shortNotionalCap`, `scaleSellQtyToAtm`, `listHedgeStrikes`, the OI-limit helpers, and number and IV normalisation |
 | `api.js` | Delta REST wrapper, product, expiry and strike extraction, spot price, and the auto-reconnecting ticker stream |
 | `components/scanner/*` | Filter defaults, storage keys, and the saved-settings toolbar |
 | `components/common/*` | Inputs, selects, and the promise-based alert and confirm dialog |
@@ -106,16 +106,22 @@ Products are reloaded every 5 minutes so new expiries and rollovers are picked u
 | Hedge on means hedged spreads only | Matches paper trading, which never enters a plain 2-leg spread when a window's hedge is on. |
 | OI gate covers the long, short and hedge | Delta's reduce-only lock blocks opening any leg on that strike. Pricing lookups still see the full chain. |
 | Leverage by underlying and expiry | Matches Delta's margin and the Option Scope engine: full leverage at DTE 0–1, at most 100x after that. |
+| Every row at the same short notional | The notional follows the leverage ($195k at 200x, $95k at 100x), and rows are scaled up or down to it. Rows are comparable and use the full margin, matching the engine's entry sizing. |
+| Hedge = nearest qualifying strike | Matches the paper engine's choice. The row's numbers are the ones the engine would trade. |
 
 ## 7. Non-functional notes
 
 - **Performance**: pairing is O(N²) per side per scan. With a few hundred strikes this is well under the 2 s budget.
 - **Resilience**: the WebSocket reconnects on close. A failed spot fetch or a missing ATM quote shows `—` instead of an error.
-- **Consistency**: `scannerUtils.js` has "twin" copies in Option Scope's engine. Any change to leverage, hedge selection or the OI gate must be made in both.
+- **Consistency**: `scannerUtils.js` has "twin" copies in Option Scope's engine. Any change to leverage, the notional cap, ATM scaling, hedge selection or the OI gate must be made in both.
 - **Deployment**: static build on Vercel. [vercel.json](../vercel.json) adds the `/api` rewrite and the SPA fallback.
 
 ## 8. Differences from Option Scope's tab
 
-- Filter defaults are all `0`.
+The scanner logic is the same as Option Scope's. Only these differ:
+
+- Filter defaults are deliberately `0`. Option Scope's are non-zero.
 - No **Send to Window** button, because there is no Supabase or paper trading here.
+- The Navbar has only the Ratio Spread tab, and lives in `components/RatioSpreadScanner/`.
+- No order-book helpers in `api.js`.
 - `onNavigate` is a no-op, because there is only one page.

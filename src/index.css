@@ -2400,6 +2400,28 @@ body.light-theme .scanner-logs-body::-webkit-scrollbar-thumb:hover {
   transform: scale(1.02);
 }
 
+/* Group header (Delta positions table): close the whole spread. */
+.pt-btn-close-spread {
+  padding: 3px 9px;
+  font-size: 10px;
+}
+
+/* Close Calls / Close Puts — outlined, next to the solid Close All. */
+.pt-btn-close-dir {
+  height: 28px;
+  margin-right: 6px;
+}
+
+.pt-btn-close-n {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: rgba(246, 70, 93, 0.15);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+}
+
 /* ── Empty States ────────────────────────────────────── */
 .pt-empty {
   display: flex;
@@ -2504,6 +2526,13 @@ body.light-theme .scanner-logs-body::-webkit-scrollbar-thumb:hover {
   color: #ff9800;
   background: rgba(255, 152, 0, 0.08);
   border: 1px solid rgba(255, 152, 0, 0.2);
+}
+
+/* Paper "Replace Farther Pair" exits (migration 059). */
+.pt-exit-badge.replace {
+  color: #ec4899;
+  background: rgba(236, 72, 153, 0.08);
+  border: 1px solid rgba(236, 72, 153, 0.2);
 }
 
 /* ── History stat line ───────────────────────────────── */
@@ -4739,6 +4768,168 @@ body.light-theme .pt-btn-apply.active {
   }
 }
 
+/* ── Entry-block notifications (🚦) ──
+   A button in the navbar on every screen; its panel drops down below it. */
+.eb-nav-wrap {
+  position: relative;
+}
+
+.eb-nav-btn {
+  position: relative;
+  padding: 6px 8px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.eb-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--put);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.eb-panel-desk {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 9998;
+}
+
+.eb-panel {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  max-height: 420px;
+  overflow-y: auto;
+  background: rgba(10, 13, 18, 0.98);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+  text-align: left;
+}
+
+.eb-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: rgba(10, 13, 18, 0.98);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.eb-panel-head button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.eb-panel-empty {
+  padding: 18px 14px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.eb-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid var(--put);
+}
+
+.eb-item.contended {
+  border-left-color: #f0a020;
+}
+
+.eb-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.eb-line {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.eb-line b {
+  color: var(--text);
+}
+
+.eb-cause {
+  margin-left: 6px;
+  color: var(--put);
+  font-weight: 600;
+}
+
+.eb-item.contended .eb-cause {
+  color: #f0a020;
+}
+
+.eb-spread {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.eb-count {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+
+.eb-item-msg {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.eb-item-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+@media (max-width: 768px) {
+  /* Phones: the panel spans the screen under the navbar instead of hanging off the button. */
+  .eb-panel-desk {
+    position: fixed;
+    top: 56px;
+    left: 8px;
+    right: 8px;
+  }
+
+  .eb-panel-desk .eb-panel {
+    width: auto;
+    max-width: none;
+    max-height: 60vh;
+  }
+}
+
 /* ── Mobile Bottom Navigation Bar ── */
 .mobile-bottom-nav {
   display: none;
@@ -5581,13 +5772,6 @@ body.light-theme .pt-btn-apply.active {
   gap: 10px;
 }
 
-.pt-excl-manual {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.pt-excl-add-btn,
 .pt-excl-clear {
   border: 1px solid var(--border);
   background: var(--bg3);
@@ -5601,15 +5785,9 @@ body.light-theme .pt-btn-apply.active {
   transition: border-color 0.15s, color 0.15s;
 }
 
-.pt-excl-add-btn:hover:not(:disabled),
 .pt-excl-clear:hover {
   border-color: #3b82f6;
   color: #3b82f6;
-}
-
-.pt-excl-add-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .pt-excl-clear {
@@ -5618,10 +5796,9 @@ body.light-theme .pt-btn-apply.active {
   background: transparent;
 }
 
-.pt-excl-error {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--danger);
+.pt-excl-chip-exp {
+  font-weight: 500;
+  opacity: 0.75;
 }
 
 .pt-excl-chips {
@@ -6563,6 +6740,46 @@ body.light-theme .pt-btn-apply.active {
   color: var(--text-dim);
 }
 
+/* Daily Report account picker — reuses the Live Trading account dropdown styles. */
+.dr-account-picker {
+  width: 240px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.dr-account-picker .account-dropdown-trigger {
+  height: 34px;
+  padding: 0 12px;
+}
+
+.dr-account-picker .account-dropdown-trigger-content {
+  overflow: hidden;
+}
+
+.dr-account-picker .account-dropdown-menu {
+  max-width: calc(100vw - 32px);
+}
+
+.dr-account-picker .dr-edit-groups {
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.dr-group-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border: 1px solid #a371f7;
+  border-radius: 4px;
+  color: #a371f7;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 .dr-date {
   height: 34px;
   padding: 0 10px;
@@ -6742,6 +6959,29 @@ body.light-theme .dr-date {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: #f0a020;
+}
+
+/* Slippage tab: quote → fill over the slippage, per leg. */
+.sl-leg {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  white-space: nowrap;
+}
+
+.sl-px {
+  font-variant-numeric: tabular-nums;
+}
+
+.sl-slip {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.sl-muted {
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .dr-status.backfilled {
@@ -7521,3 +7761,22 @@ details.dr-note p {
 .app-dialog-btn.primary { color: #fff; }
 .app-dialog-btn.primary:hover { filter: brightness(1.1); }
 .app-dialog-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Account switch: the previous account's filters/windows stay on screen until the new
+   account's load — dim and lock them so nothing is read or saved against the wrong account. */
+.pt-account-switching {
+  opacity: 0.35;
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 0.15s;
+}
+.pt-account-loading {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
