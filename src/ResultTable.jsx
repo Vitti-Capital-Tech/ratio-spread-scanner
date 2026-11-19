@@ -272,8 +272,8 @@ export default function ResultTable({
       // × Hedge Lot %. At ATM it is worth the bid at the ATM-shifted hedge strike (same
       // shift as the long/short); unquoted there = worthless (whole premium lost). Its
       // premium adds to margin. Mirrors the engine's ATM P&L gate.
-      // Every qualifying hedge option is priced the same way and the row uses the one with the
-      // best ATM ROI (then ATM P&L); unpriceable at ATM → the nearest (first) option.
+      // The row prices the nearest qualifying hedge option (chosen in RatioSpreadScanner.jsx)
+      // — the same nearest-the-short rule as the paper and live engines.
       const hedgePct = (Number(config?.hedgeLotPct) || 0) / 100;
       const legsPnl = hasAtmData
         ? (buyIntrinsic - r.buyPrice) + (r.sellPrice - sellIntrinsic) * totalSellQty
@@ -315,6 +315,9 @@ export default function ResultTable({
         naturalSellQty: r.sellQty,
         isRatioChanged,
         netPremium: Number(rawNetPremium).toFixed(2),
+        // Net premium for the position actually shown (both legs × scale, i.e. the size whose
+        // margin is in Req. Margin): per-1-long net × long size. Hedge cost is already in it.
+        actualNetPremium: Number(rawNetPremium) * lotSize * scale,
         buyIntrinsic,
         sellIntrinsic,
         buyIntrinsicDetail: buyInfo.detail,
@@ -333,6 +336,14 @@ export default function ResultTable({
     // inputs live in that section). Drop spreads whose at-ATM P&L or ROI falls
     // below the configured minimums. Rows without ATM data (P&L/ROI unknowable)
     // are left in and shown as "—" rather than hidden on transient missing quotes.
+    // Max Net Credit (same rule as paper trading's toggle, migration 071): the ATM floors
+    // are off and rows are ranked by net credit (largest first; ties → nearer ATM), so
+    // the top row per long strike is the spread paper trading would enter.
+    if (config?.entryByMaxCredit) {
+      const dist = (r) => Math.abs(Number(r.buyLeg.strike) - (currentSpot ?? 0));
+      return [...processedResults].sort((a, b) =>
+        (Number(b.netPremium) - Number(a.netPremium)) || (dist(a) - dist(b)));
+    }
     const minAtmPnl = Number(config?.minAtmPnl) || 0;
     const minAtmRoi = Number(config?.minAtmRoi) || 0;
     return processedResults.filter(r =>
@@ -430,19 +441,28 @@ export default function ResultTable({
 
                 // Sort unique buy strikes by distance to ATM within each option type
                 // Calls should be listed ascending from ATM, puts descending from ATM.
+                // Max Net Credit ON (same as paper trading): inside each long strike the
+                // largest net credit leads, and the long strikes are ordered by that best
+                // credit (largest first; ties → nearer ATM). OFF: ATM order + ROI.
+                const byCredit = !!config?.entryByMaxCredit;
+                const credit = (r) => Number(r.netPremium) || 0;
+                Object.keys(groups).forEach(strike => {
+                  groups[strike].sort(byCredit ? (a, b) => credit(b) - credit(a) || b.roi - a.roi : (a, b) => b.roi - a.roi);
+                });
+
                 const sortedBuyStrikes = Object.keys(groups)
                   .map(Number)
                   .sort((a, b) => {
+                    if (byCredit) {
+                      const d = credit(groups[b][0]) - credit(groups[a][0]);
+                      if (d) return d;
+                      return Math.abs(a - currentSpot) - Math.abs(b - currentSpot);
+                    }
                     if (type === 'CALL') return a - b;
                     if (type === 'PUT') return b - a;
                     return a - b;
                   })
                   .map(String);
-
-                // Sort sub-rows within each group by ROI descending
-                Object.keys(groups).forEach(strike => {
-                  groups[strike].sort((a, b) => b.roi - a.roi);
-                });
 
                 let globalRank = 1;
 
@@ -508,7 +528,7 @@ export default function ResultTable({
                         </td>
                         <td>
                           <div className={parseFloat(bestRow.netPremium) >= 0 ? 'scanner-buy' : 'scanner-sell'} style={{ fontWeight: 700 }}>
-                            ${Math.abs(parseFloat(bestRow.netPremium))}
+                            <span title={`Per 1 long unit (ratio 1:${bestRow.originalSellQty}) / for the position size shown (long ${bestRow.buyLeg.lotSize}, Req. Margin column)`}>${Math.abs(parseFloat(bestRow.netPremium))} / ${Math.abs(bestRow.actualNetPremium).toFixed(2)}</span>
                           </div>
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
                             {bestRow.ivDiff.toFixed(1)}% IV{bestRow.hedge ? ' · incl. hedge' : ''}
@@ -590,7 +610,7 @@ export default function ResultTable({
                             </td>
                             <td>
                               <div className={parseFloat(r.netPremium) >= 0 ? 'scanner-buy' : 'scanner-sell'} style={{ fontWeight: 700 }}>
-                                ${Math.abs(parseFloat(r.netPremium))}
+                                <span title={`Per 1 long unit (ratio 1:${r.originalSellQty}) / for the position size shown (long ${r.buyLeg.lotSize}, Req. Margin column)`}>${Math.abs(parseFloat(r.netPremium))} / ${Math.abs(r.actualNetPremium).toFixed(2)}</span>
                               </div>
                               <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
                                 {r.ivDiff.toFixed(1)}% IV{r.hedge ? ' · incl. hedge' : ''}
